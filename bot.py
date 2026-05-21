@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
 MASTER SIGNALS PRO - Telegram Bot
-Supabase + python-telegram-bot 13.15
+python-telegram-bot==20.7 + supabase
 """
 
 import random
 import os
 import uuid
 import logging
-import time
+import asyncio
 from datetime import datetime, timedelta
 from supabase import create_client
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    Updater, CommandHandler, CallbackQueryHandler,
-    MessageHandler, Filters, CallbackContext
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ContextTypes
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -31,33 +31,19 @@ BEP20_ADDR = "0x230badccf11a0de2b8a261ae3f99c07235174d6b"
 BUY_IMAGE_ID  = "AgACAgQAAxkBAAICImoJRV1p8boUWCqbwbFQw5ZGFKi0AAJgDmsbgwZJUEAvhDh1tBD2AQADAgADeAADOwQ"
 SELL_IMAGE_ID = "AgACAgQAAxkBAAICJGoJRZxn3w0clOl57ozxypDEUij0AAJhDmsbgwZJUBAZYceshO6HAQADAgADeAADOwQ"
 
-# ============================================================
-# SUPABASE CLIENT
-# ============================================================
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def init_db():
-    """Create tables if not exist via Supabase SQL"""
-    try:
-        sb.table("users").select("user_id").limit(1).execute()
-    except:
-        pass
-    try:
-        sb.table("licences").select("code").limit(1).execute()
-    except:
-        pass
-
+# ============================================================
+# DATABASE
+# ============================================================
 def get_user(user_id):
     res = sb.table("users").select("*").eq("user_id", user_id).execute()
     if res.data:
         return res.data[0]
     sb.table("users").insert({
-        "user_id":     user_id,
-        "free_used":   0,
-        "licensed":    False,
-        "licence_type": None,
-        "licence_code": None,
-        "expiry":      None,
+        "user_id": user_id, "free_used": 0,
+        "licensed": False, "licence_type": None,
+        "licence_code": None, "expiry": None,
     }).execute()
     return get_user(user_id)
 
@@ -79,7 +65,7 @@ def get_expiry_text(user_id):
         return "♾️ Lifetime"
     expiry = u.get("expiry")
     if expiry:
-        exp_dt = datetime.fromisoformat(expiry.replace("Z",""))
+        exp_dt = datetime.fromisoformat(expiry.replace("Z", ""))
         days   = (exp_dt - datetime.now()).days
         return "📅 Expires: {} ({} days left)".format(str(expiry)[:10], days)
     return "Unknown"
@@ -118,24 +104,22 @@ def generate_code(ltype):
     return "{}-".format(prefix) + "-".join(parts)
 
 def add_licence(code, ltype):
-    sb.table("licences").insert({
-        "code": code, "type": ltype, "used": False
-    }).execute()
+    sb.table("licences").insert({"code": code, "type": ltype, "used": False}).execute()
 
 def get_stats():
-    users    = sb.table("users").select("*").execute().data
-    licences = sb.table("licences").select("*").execute().data
-    total    = len(users)
-    monthly  = sum(1 for u in users if u.get("licence_type") == "monthly" and u.get("licensed"))
-    lifetime = sum(1 for u in users if u.get("licence_type") == "lifetime")
-    free     = sum(1 for u in users if not u.get("licensed"))
-    m_av     = [l["code"] for l in licences if not l["used"] and l["type"] == "monthly"]
-    l_av     = [l["code"] for l in licences if not l["used"] and l["type"] == "lifetime"]
-    return {"total": total, "monthly": monthly, "lifetime": lifetime,
-            "free": free, "m_codes": m_av, "l_codes": l_av}
+    users    = sb.table("users").select("*").execute().data or []
+    licences = sb.table("licences").select("*").execute().data or []
+    return {
+        "total":   len(users),
+        "monthly": sum(1 for u in users if u.get("licence_type") == "monthly" and u.get("licensed")),
+        "lifetime":sum(1 for u in users if u.get("licence_type") == "lifetime"),
+        "free":    sum(1 for u in users if not u.get("licensed")),
+        "m_codes": [l["code"] for l in licences if not l["used"] and l["type"] == "monthly"],
+        "l_codes": [l["code"] for l in licences if not l["used"] and l["type"] == "lifetime"],
+    }
 
 # ============================================================
-# ALL PAIRS - MIXED OTC + REAL
+# ALL PAIRS - FULLY MIXED
 # ============================================================
 ALL_PAIRS = [
     "EUR/USD OTC",  "EUR/USD",      "GBP/USD OTC",
@@ -196,7 +180,6 @@ def generate_signal(pair):
     momentum = random.uniform(0, 1)
     stoch    = random.uniform(10, 90)
     volume   = random.uniform(0.3, 1.0)
-
     buy = sell = 0
     if rsi < 25:    buy  += 45
     elif rsi < 40:  buy  += 25
@@ -214,7 +197,6 @@ def generate_signal(pair):
     if volume > 0.7:
         if buy > sell: buy  += 10
         else:          sell += 10
-
     direction = "BUY" if buy >= sell else "SELL"
     dominant  = max(buy, sell)
     total     = buy + sell
@@ -259,10 +241,10 @@ def payment_keyboard():
 # ============================================================
 # HANDLERS
 # ============================================================
-def start(update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     get_user(user_id)
-    update.message.reply_text(
+    await update.message.reply_text(
         "⚡ *MASTER SIGNALS PRO*\n\n"
         "🏆 *Win Rate: 90% — 98%*\n"
         "📊 100+ Trading Pairs\n"
@@ -272,10 +254,10 @@ def start(update, context):
         reply_markup=pairs_keyboard()
     )
 
-def help_command(update, context):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id == ADMIN_ID:
-        update.message.reply_text(
+        await update.message.reply_text(
             "🔧 *ADMIN COMMANDS:*\n\n"
             "`/addmonthly` — Generate 1 monthly code\n"
             "`/addmonthly 5` — Generate 5 monthly codes\n"
@@ -287,7 +269,7 @@ def help_command(update, context):
             parse_mode="Markdown"
         )
     else:
-        update.message.reply_text(
+        await update.message.reply_text(
             "⚡ *MASTER SIGNALS PRO*\n\n"
             "📌 *How to use:*\n"
             "1️⃣ Select your trading pair\n"
@@ -303,17 +285,17 @@ def help_command(update, context):
             ])
         )
 
-def button_handler(update, context):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q       = update.callback_query
-    q.answer()
+    await q.answer()
     data    = q.data
     chat    = q.message.chat_id
     user_id = q.from_user.id
 
     if data == "choose_pair":
-        try: q.message.delete()
+        try: await q.message.delete()
         except: pass
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=chat,
             text="⚡ *MASTER SIGNALS PRO*\n\nSelect your trading pair:",
             parse_mode="Markdown",
@@ -322,7 +304,7 @@ def button_handler(update, context):
         return
 
     if data == "pay_info":
-        q.edit_message_text(
+        await q.edit_message_text(
             "💰 *UNLOCK MASTER SIGNALS PRO*\n\n"
             "📅 *Monthly Access*\n"
             "♾️ *Lifetime Access*\n\n"
@@ -346,7 +328,7 @@ def button_handler(update, context):
         return
 
     if data == "back_unlock":
-        q.edit_message_text(
+        await q.edit_message_text(
             "🔒 *LICENCE REQUIRED*\n\n"
             "You have used your 1 free signal.\n"
             "Contact admin to get access.",
@@ -357,7 +339,7 @@ def button_handler(update, context):
 
     if data == "enter_code":
         context.user_data["awaiting_code"] = True
-        q.edit_message_text(
+        await q.edit_message_text(
             "🔑 *Enter your licence code:*\n\n"
             "Monthly format: `EVAL-M-XXXX-XXXX-XXXX`\n"
             "Lifetime format: `EVAL-L-XXXX-XXXX-XXXX`\n\n"
@@ -369,9 +351,9 @@ def button_handler(update, context):
     if data.startswith("sel_"):
         pair = data[4:]
         if not is_licensed(user_id) and free_signals_used(user_id) >= 1:
-            try: q.message.delete()
+            try: await q.message.delete()
             except: pass
-            context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=chat,
                 text=(
                     "🔒 *LICENCE REQUIRED*\n\n"
@@ -387,15 +369,15 @@ def button_handler(update, context):
             )
             return
 
-        try: q.message.delete()
+        try: await q.message.delete()
         except: pass
 
-        creating_msg = context.bot.send_message(
+        creating_msg = await context.bot.send_message(
             chat_id=chat,
             text="🔵 *Creating a signal for {}*".format(pair),
             parse_mode="Markdown"
         )
-        time.sleep(2)
+        await asyncio.sleep(2)
 
         signal   = generate_signal(pair)
         is_buy   = signal["direction"] == "BUY"
@@ -405,13 +387,13 @@ def button_handler(update, context):
         if not is_licensed(user_id):
             use_free_signal(user_id)
 
-        try: creating_msg.delete()
+        try: await creating_msg.delete()
         except: pass
 
         caption = "*{}* {}\n🕐 In {} mins.\n📊 Signal strength: {}".format(
             pair, trend, signal["timeframe"], signal["strength"])
 
-        context.bot.send_photo(
+        await context.bot.send_photo(
             chat_id=chat,
             photo=image_id,
             caption=caption,
@@ -419,7 +401,7 @@ def button_handler(update, context):
             reply_markup=signal_keyboard(pair)
         )
 
-def message_handler(update, context):
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text    = update.message.text.strip() if update.message.text else ""
 
@@ -432,7 +414,7 @@ def message_handler(update, context):
                 code = generate_code("monthly")
                 add_licence(code, "monthly")
                 codes.append("`{}`".format(code))
-            update.message.reply_text(
+            await update.message.reply_text(
                 "✅ *{} Monthly Code{}:*\n\n".format(count, "s" if count > 1 else "") +
                 "\n".join(codes) + "\n\n📅 Valid 30 days after activation.",
                 parse_mode="Markdown"
@@ -447,7 +429,7 @@ def message_handler(update, context):
                 code = generate_code("lifetime")
                 add_licence(code, "lifetime")
                 codes.append("`{}`".format(code))
-            update.message.reply_text(
+            await update.message.reply_text(
                 "✅ *{} Lifetime Code{}:*\n\n".format(count, "s" if count > 1 else "") +
                 "\n".join(codes) + "\n\n♾️ Never expires.",
                 parse_mode="Markdown"
@@ -462,12 +444,12 @@ def message_handler(update, context):
                 msg += "*Monthly:*\n" + "\n".join(["`{}`".format(c) for c in s["m_codes"]]) + "\n\n"
             if s["l_codes"]:
                 msg += "*Lifetime:*\n" + "\n".join(["`{}`".format(c) for c in s["l_codes"]])
-            update.message.reply_text(msg, parse_mode="Markdown")
+            await update.message.reply_text(msg, parse_mode="Markdown")
             return
 
         if text == "/listusers":
             s = get_stats()
-            update.message.reply_text(
+            await update.message.reply_text(
                 "👥 *USERS*\n\n👤 Total: {}\n📅 Monthly: {}\n♾️ Lifetime: {}\n🆓 Free: {}".format(
                     s["total"], s["monthly"], s["lifetime"], s["free"]),
                 parse_mode="Markdown"
@@ -478,10 +460,10 @@ def message_handler(update, context):
         context.user_data["awaiting_code"] = False
         code = text.upper().strip()
         if activate_licence(code, user_id):
-            exp        = get_expiry_text(user_id)
             u          = get_user(user_id)
+            exp        = get_expiry_text(user_id)
             type_label = "📅 Monthly" if u.get("licence_type") == "monthly" else "♾️ Lifetime"
-            update.message.reply_text(
+            await update.message.reply_text(
                 "✅ *Licence Activated!*\n\n🎉 Welcome to MASTER SIGNALS PRO!\n"
                 "🏆 Win Rate: 90% — 98%\n🔑 Type: *{}*\n⏳ {}\n\n"
                 "You can now use unlimited signals!".format(type_label, exp),
@@ -491,7 +473,7 @@ def message_handler(update, context):
                 ])
             )
         else:
-            update.message.reply_text(
+            await update.message.reply_text(
                 "❌ *Invalid or already used code.*\n\nCheck your code or contact admin.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
@@ -505,32 +487,28 @@ def message_handler(update, context):
 # ============================================================
 def main():
     print("MASTER SIGNALS PRO starting...")
-    init_db()
     print("Supabase connected!")
-
-    updater = Updater(BOT_TOKEN)
-    dp      = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CallbackQueryHandler(button_handler))
-    dp.add_handler(MessageHandler(Filters.text, message_handler))
 
     PORT       = int(os.environ.get("PORT", 8443))
     RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT, message_handler))
+
     if RENDER_URL:
         print("Running on Render - webhook mode")
-        updater.start_webhook(
+        app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
+            webhook_url="{}/{}".format(RENDER_URL, BOT_TOKEN),
             url_path=BOT_TOKEN,
-            webhook_url="{}/{}".format(RENDER_URL, BOT_TOKEN)
         )
-        updater.idle()
     else:
         print("Running locally - polling mode")
-        updater.start_polling()
-        updater.idle()
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
